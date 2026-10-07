@@ -32,6 +32,12 @@
 # (Docker Hub push gated on the DOCKERHUB_USERNAME/DOCKERHUB_TOKEN secrets;
 # if unset the build still pushes to GHCR.)
 #
+# januscaler fork: the debpalash GHCR paths are not ours to push to, so here
+# the CUDA image goes to Docker Hub only, as docker.io/shivanshtalwar0/
+# omnivoice-studio (repository variables DOCKERHUB_USERNAME / DOCKERHUB_IMAGE
+# override it), and needs the repository secret DOCKERHUB_TOKEN (Read & Write).
+# The ROCm job runs upstream only: nothing here runs on AMD GPUs.
+#
 # On main pushes the Docker Hub repository overview is also synced from
 # deploy/dockerhub-overview.md (source of truth for the hub.docker.com page).
 #
@@ -73,7 +79,10 @@ env:
   IMAGE_NAME: debpalash/voicestudio
   # Compatibility alias: keep existing deployments on the same tag stream.
   LEGACY_IMAGE_NAME: debpalash/omnivoice-studio
-  DOCKERHUB_IMAGE: palashdeb/omnivoice-studio
+  # GHCR only from the upstream repository (see the januscaler note above).
+  PUBLISH_GHCR: ${{ github.repository == 'debpalash/VoiceStudio' }}
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'shivanshtalwar0' }}
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'shivanshtalwar0/omnivoice-studio' }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -128,6 +137,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
+        if: env.PUBLISH_GHCR == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -140,11 +150,18 @@ jobs:
         id: dockerhub
         run: echo "enabled=${{ secrets.DOCKERHUB_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
 
+      # Without GHCR, Docker Hub is the only place the image can go.
+      - name: Require a registry
+        if: env.PUBLISH_GHCR != 'true' && steps.dockerhub.outputs.enabled != 'true'
+        run: |
+          echo "::error::DOCKERHUB_TOKEN is not set; add it under Settings > Secrets and variables > Actions."
+          exit 1
+
       - name: Log in to Docker Hub
         if: steps.dockerhub.outputs.enabled == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Tag strategy (`:sha-<short>` is emitted on every trigger):
@@ -165,8 +182,8 @@ jobs:
           # blank when the secret is unset, so metadata-action emits GHCR-only
           # tags in that case.
           images: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ env.REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}
+            ${{ env.PUBLISH_GHCR == 'true' && format('{0}/{1}', env.REGISTRY, env.IMAGE_NAME) || '' }}
+            ${{ env.PUBLISH_GHCR == 'true' && format('{0}/{1}', env.REGISTRY, env.LEGACY_IMAGE_NAME) || '' }}
             ${{ steps.dockerhub.outputs.enabled == 'true' && env.DOCKERHUB_IMAGE || '' }}
           flavor: |
             latest=false
@@ -205,13 +222,15 @@ jobs:
           MINOR="${VERSION%.*}"
           TAGS=("$VERSION" "$MINOR")
           if [[ "$PROMOTE_STABLE" == "true" ]]; then TAGS=(stable "${TAGS[@]}"); fi
-          for IMAGE in "$IMAGE_NAME" "$LEGACY_IMAGE_NAME"; do
-            for TAG in "${TAGS[@]}"; do
-              docker buildx imagetools create \
-                --tag "${REGISTRY}/${IMAGE}:${TAG}" \
-                "${REGISTRY}/${IMAGE}:${SOURCE_TAG}"
+          if [[ "$PUBLISH_GHCR" == "true" ]]; then
+            for IMAGE in "$IMAGE_NAME" "$LEGACY_IMAGE_NAME"; do
+              for TAG in "${TAGS[@]}"; do
+                docker buildx imagetools create \
+                  --tag "${REGISTRY}/${IMAGE}:${TAG}" \
+                  "${REGISTRY}/${IMAGE}:${SOURCE_TAG}"
+              done
             done
-          done
+          fi
           if [[ "$DOCKERHUB_ENABLED" == "true" ]]; then
             for TAG in "${TAGS[@]}"; do
               docker buildx imagetools create \
@@ -236,7 +255,7 @@ jobs:
         continue-on-error: true
         uses: peter-evans/dockerhub-description@432a30c9e07499fd01da9f8a49f0faf9e0ca5b77 # v4.0.2
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_IMAGE }}
           short-description: "Local ElevenLabs alternative: voice cloning, design & video dubbing in 646 languages. No API keys."
@@ -250,7 +269,8 @@ jobs:
   # is ~10 GB compressed / ~25 GB unpacked.
   build-and-push-rocm:
     # Only version releases publish images; other release tags are ignored.
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
+    # Upstream only (januscaler fork: no AMD GPUs to serve).
+    if: github.repository == 'debpalash/VoiceStudio' && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

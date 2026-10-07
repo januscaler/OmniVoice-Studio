@@ -1,4 +1,8 @@
-"""Keep the canonical and compatibility GHCR coordinates in one tag stream."""
+"""Keep the canonical and compatibility GHCR coordinates in one tag stream.
+
+januscaler fork: those GHCR paths are upstream's, so the fork publishes its
+CUDA image to its own Docker Hub repository instead (see docker.yml).
+"""
 
 import os
 
@@ -19,7 +23,8 @@ def test_the_ghcr_paths_are_explicit_and_keep_the_legacy_alias():
     env = _env()
     assert env["IMAGE_NAME"] == "debpalash/voicestudio"
     assert env["LEGACY_IMAGE_NAME"] == "debpalash/omnivoice-studio"
-    assert "github.repository" not in str(env)
+    for key in ("IMAGE_NAME", "LEGACY_IMAGE_NAME"):
+        assert "${{" not in env[key], f"{key} must be a literal path, not derived from the repository"
 
 
 def test_release_backfills_require_an_actual_git_tag():
@@ -28,10 +33,20 @@ def test_release_backfills_require_an_actual_git_tag():
     assert 'git rev-parse "${RELEASE_REF}^{commit}"' not in workflow
 
 
-def test_both_ghcr_paths_are_published_by_both_builds():
+def test_both_ghcr_paths_are_published_by_both_builds_upstream_only():
+    with open(WORKFLOW, encoding="utf-8") as fh:
+        workflow = yaml.safe_load(fh)
     text = open(WORKFLOW, encoding="utf-8").read()
-    assert text.count("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}") == 2
-    assert text.count("${{ env.REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}") == 2
+    assert workflow["env"]["PUBLISH_GHCR"] == "${{ github.repository == 'debpalash/VoiceStudio' }}"
+    # CUDA build: both GHCR paths, each behind the upstream-only gate.
+    for key in ("IMAGE_NAME", "LEGACY_IMAGE_NAME"):
+        assert f"${{{{ env.PUBLISH_GHCR == 'true' && format('{{0}}/{{1}}', env.REGISTRY, env.{key}) || '' }}}}" in text
+    steps = {step.get("name"): step for step in workflow["jobs"]["build-and-push"]["steps"]}
+    assert steps["Log in to GHCR"]["if"] == "env.PUBLISH_GHCR == 'true'"
+    # ROCm build: unchanged paths, and the whole job runs upstream only.
+    assert text.count("${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}") == 1
+    assert text.count("${{ env.REGISTRY }}/${{ env.LEGACY_IMAGE_NAME }}") == 1
+    assert workflow["jobs"]["build-and-push-rocm"]["if"].startswith("github.repository == 'debpalash/VoiceStudio' && ")
 
 
 def test_current_release_tags_are_backfilled_for_both_gpu_flavors():
@@ -52,8 +67,17 @@ def test_sha_tags_follow_the_checked_out_source_commit():
     assert "GITHUB_SHA::7" not in text
 
 
-def test_docker_hub_keeps_its_existing_coordinate():
-    assert _env()["DOCKERHUB_IMAGE"] == "palashdeb/omnivoice-studio"
+def test_the_fork_publishes_to_its_own_docker_hub_repository():
+    env = _env()
+    assert env["DOCKERHUB_IMAGE"] == "${{ vars.DOCKERHUB_IMAGE || 'shivanshtalwar0/omnivoice-studio' }}"
+    assert env["DOCKERHUB_USERNAME"] == "${{ vars.DOCKERHUB_USERNAME || 'shivanshtalwar0' }}"
+    with open(WORKFLOW, encoding="utf-8") as fh:
+        steps = {step.get("name"): step for step in yaml.safe_load(fh)["jobs"]["build-and-push"]["steps"]}
+    assert steps["Log in to Docker Hub"]["with"]["username"] == "${{ env.DOCKERHUB_USERNAME }}"
+    # Without GHCR there is nowhere else to push: a missing token must fail loudly.
+    require = steps["Require a registry"]
+    assert require["if"] == "env.PUBLISH_GHCR != 'true' && steps.dockerhub.outputs.enabled != 'true'"
+    assert "DOCKERHUB_TOKEN is not set" in require["run"] and "exit 1" in require["run"]
 
 
 def test_active_templates_use_the_canonical_public_path():
