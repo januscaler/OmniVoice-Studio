@@ -3584,10 +3584,11 @@ async def idle_worker():
             logger.warning("idle watermark-model release failed", exc_info=True)
         # The wav2vec2 aligners and the pyannote pipeline: loaded by the first
         # transcription that needed them, then held for the life of the process.
+        # Looked up, not imported: asr_backend imports this module, and if it
+        # was never imported no aligner was loaded either.
         try:
-            from services.asr_backend import release_idle_align_models
-
-            if release_idle_align_models(idle_timeout):
+            asr = sys.modules.get("services.asr_backend")
+            if asr is not None and asr.release_idle_align_models(idle_timeout):
                 free_vram()
         except Exception:  # noqa: BLE001 — the reaper must never kill idle_worker
             logger.warning("idle aligner release failed", exc_info=True)
