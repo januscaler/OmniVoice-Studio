@@ -65,6 +65,10 @@ metadata and the backend fallback mirror it.
 - A dub that finishes just as it is cancelled reports done instead of cancelled (#2585)
 - First-run setup tracks a package's download when uv spells its name with underscores on one line and hyphens on another (#2585)
 
+### CI
+
+- This fork's Docker image is published to Docker Hub as `shivanshtalwar0/omnivoice-studio` instead of the upstream GHCR paths it cannot push to, and the ROCm image is left to upstream (#2)
+
 ## [0.5.7] — 2026-10-05
 
 **VoiceStudio now runs on PCs without a GPU and recovers instead of giving up.** Voice cloning uses the speech-to-text model you installed from Model Catalogue, GPU-less computers get the small CPU PyTorch build, and slow or busy backends are no longer reported as failed.
