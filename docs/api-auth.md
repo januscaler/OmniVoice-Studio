@@ -89,6 +89,12 @@ mode without a configured key or PIN keeps its existing open consumption policy
 for export metadata, with destination paths redacted from anonymous responses;
 the operator's port mapping controls access in that mode.
 
+Recording separation (`POST /separate-audio`, vocals and background as a ZIP)
+uses the same consumption gate: local clients and authenticated remote
+consumers are accepted and anonymous remote callers are rejected. Unlike the
+admin-gated `POST /clean-audio`, it does not need admin capability. See
+[Separating a recording](production-private-api.md#separating-a-recording-into-vocals-and-background).
+
 The API key is the backend's durable root credential for a GPU box, Docker
 container, or reverse-proxied host. Direct API clients may send it on each
 request. The first-party browser/Electron UI instead exchanges it once for a
