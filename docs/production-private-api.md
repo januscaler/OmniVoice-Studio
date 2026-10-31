@@ -113,6 +113,37 @@ curl https://voicestudio.internal/v1/audio/transcriptions \
 Use the actual selected engine id instead of an alias when validating routing.
 More SDK and authentication examples are in [API authentication](api-auth.md).
 
+## Separating a recording into vocals and background
+
+`POST /separate-audio` splits one uploaded recording with Demucs (`htdemucs`)
+and returns both stems. It is a consumption route, like the dub and speech
+routes: local clients and authenticated remote consumers (API key, share PIN,
+trusted network) may call it, and it is not behind the admin gate. A
+route-aware proxy can therefore allow it without allowing `/system/*` or the
+admin-only `POST /clean-audio`.
+
+- Request: `multipart/form-data` with `audio` (a `.wav`, `.mp3`, `.m4a`,
+  `.aac`, `.flac`, `.ogg`, `.opus` or `.wma` file, at most 128 MB), plus
+  optional `sample_rate` (8000–48000) and `channels` (1 or 2) applied to both
+  stems. Without them the stems keep Demucs's output (44.1 kHz stereo).
+- Success: `200`, `application/zip` with `vocals.wav` and `background.wav`.
+- Bad input: `415` (not an accepted audio type), `413` (too large), `400`
+  (empty, or not readable as audio), `422` (option out of range).
+- When Demucs cannot separate the recording, the response is an error, never
+  the input returned as a stem: `500` (Demucs failed), `504` (it timed out),
+  `503` (Demucs is not installed). The `X-Separation-Error` header carries
+  `failed`, `no_output`, `timeout`, `unavailable` or `conversion`.
+
+```bash
+curl https://voicestudio.internal/separate-audio \
+  -H "Authorization: Bearer $OMNIVOICE_API_KEY" \
+  -F "audio=@take.wav" -F "sample_rate=24000" -F "channels=1" \
+  --output stems.zip
+```
+
+Separation runs for minutes on long recordings, so give it its own client
+timeout and concurrency limit, and keep it out of the queue for speech requests.
+
 ## Operations
 
 - Persist both `/app/omnivoice_data` and the Hugging Face cache. Back up the
@@ -143,7 +174,8 @@ temporarily produces `401 Unauthorized`.
 The API key also authorizes server-mode administration. If the calling
 application should have consumption access only, use a separate VoiceStudio
 instance or a route-aware reverse proxy with a default-deny allowlist limited
-to the required speech routes. L3/L4 network policy alone cannot distinguish
+to the required speech routes (and `POST /separate-audio` if the application
+separates recordings). L3/L4 network policy alone cannot distinguish
 generation from administration. The current API key is a root credential, not
 a per-route service token. Full credential, session, WebSocket,
 trusted-network, admin-route, and CORS behavior is in

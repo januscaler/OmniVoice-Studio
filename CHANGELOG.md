@@ -14,6 +14,7 @@ metadata and the backend fallback mirror it.
 
 ### Added
 
+- `POST /separate-audio` returns a recording's vocals and background, available to API-key, PIN and trusted-network callers without admin access (#3)
 - The OpenAI-compatible speech API accepts a voice-profile name as `voice`, and the voice list shows which names work (#2617) — thanks @HuntingSuccubus!
 - New opt-in setting moves the voice model to system RAM after generation, freeing GPU memory for other apps such as a local LLM (#2618) — thanks @HuntingSuccubus!
 - Settings → About credits the speech models VoiceStudio can install, with links to their upstream terms and the required Higgs Audio and Llama notices (#2587)
