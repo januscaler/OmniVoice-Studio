@@ -141,8 +141,8 @@ async def separate_audio(
                                   os.path.join(work, "background.wav"))
             for src, dst in ((stems.vocals, vocals), (stems.background, background)):
                 if not await _to_wav(src, dst, sample_rate=sample_rate, channels=channels):
-                    logger.warning("separate-audio: converting a stem to %s Hz / %s ch failed",
-                                   sample_rate, channels)
+                    logger.warning("separate-audio: converting a stem to the requested "
+                                   "rate/channels failed")
                     raise HTTPException(
                         status_code=500,
                         detail="The separated stems could not be converted; nothing was returned.",
