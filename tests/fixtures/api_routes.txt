@@ -280,6 +280,7 @@ POST /projects
 POST /pronunciation
 POST /pronunciation/import
 POST /pronunciation/test
+POST /separate-audio
 POST /setup/warmup
 POST /stories/encode
 POST /system/crash/ack

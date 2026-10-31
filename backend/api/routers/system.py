@@ -26,6 +26,7 @@ from core.nvidia_smi import find_nvidia_smi
 from core.public_errors import public_failure
 from services.model_manager import get_model_status, get_best_device, resolve_omnivoice_checkpoint
 from services.ffmpeg_utils import find_ffmpeg, run_ffmpeg
+from services.separation import SeparationError, separate_two_stems
 
 # Router-level admin gate. Every route mounted on `router` (GET + POST,
 # present and future) is gated by `require_admin`: desktop requests must be
@@ -1372,18 +1373,9 @@ async def _do_clean_audio(audio, tmp_dir, clean_id):
 
     clean_path = converted_path
     try:
-        rc, _, _ = await run_ffmpeg(
-            [sys.executable, "-m", "demucs.separate", "--two-stems", "vocals", "-n", "htdemucs",
-             "-d", get_best_device(), converted_path, "-o", tmp_dir],
-            timeout=900.0,
-        )
-        if rc == 0:
-            demucs_out = os.path.join(tmp_dir, "htdemucs", "converted")
-            vocals_file = os.path.join(demucs_out, "vocals.wav")
-            if os.path.exists(vocals_file):
-                clean_path = vocals_file
-    except asyncio.TimeoutError:
-        logger.warning("Demucs timed out for mic audio, using raw")
+        clean_path = (await separate_two_stems(converted_path, tmp_dir)).vocals
+    except SeparationError as e:
+        logger.warning("Demucs could not isolate the mic audio (%s), using raw", e.reason)
     except Exception as e:
         logger.warning(f"Demucs failed for mic audio, using raw: {e}")
 

@@ -732,6 +732,7 @@ def _phase_a_build_inner() -> None:
         media_tools as media_tools_router,  # Audio tools: ffmpeg/ffprobe/yt-dlp
         auth as auth_router,
         voice_convert,  # Studio Convert: speech-to-speech via ASR → TTS
+        separation,  # POST /separate-audio: vocals + background (consumption tier)
     )
     from api.routers import mcp_bindings as _mcp_bindings_router  # noqa: E402
     from api.routers import workers as workers_router  # noqa: E402
@@ -745,7 +746,7 @@ def _phase_a_build_inner() -> None:
         openai_compat, tts_stream, marketplace, personas, sonitranslate,
         audiobook, longform_jobs, pronunciation, settings_router,
         media_tools_router, auth_router, _mcp_bindings_router, workers_router,
-        _telephony_twilio_router, _calls_router,
+        _telephony_twilio_router, _calls_router, separation,
     ])
     # Download-acceleration state, once, for triage-from-logs (FDL-03).
     try:
