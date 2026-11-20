@@ -43,49 +43,98 @@ def test_budget_is_conservative_enough_for_the_asr_coload():
     assert _GPU_VRAM_PER_JOB_GB >= 5.0
 
 
-# ── Growing a pool built while the card was busy ──────────────────────────
+# ── Growing a pool built while the card was busy (opt-in) ─────────────────
 
 
-def test_a_pool_grows_by_what_fits_beside_it_and_never_shrinks():
+def test_growth_keeps_a_reserve_and_is_capped_at_two_by_default():
     from services.model_manager import _grown_workers
 
-    assert _grown_workers(1, 4.0) == 1          # nothing more fits beside one worker
-    assert _grown_workers(1, 5.0) == 2
-    assert _grown_workers(1, 15.0) == _GPU_WORKER_CAP
-    assert _grown_workers(2, 11.0) == _GPU_WORKER_CAP
-    assert _grown_workers(_GPU_WORKER_CAP, 40.0) == _GPU_WORKER_CAP
+    assert _grown_workers(1, 10.0) == 1         # nothing beyond the 10 GB reserve
+    assert _grown_workers(1, 14.9) == 1
+    assert _grown_workers(1, 15.0) == 2         # one 5 GB budget fits beside the reserve
+    assert _grown_workers(1, 40.0) == 2         # capped at 2 however free the card is
+    assert _grown_workers(1, 40.0, cap=4) == _GPU_WORKER_CAP
     assert _grown_workers(3, 0.0) == 3          # a busy card never takes workers away
 
 
-def test_a_pool_with_work_waiting_grows_when_the_card_frees_up(monkeypatch):
+def _grow_pool(monkeypatch, mm, free):
+    monkeypatch.delenv("OMNIVOICE_GPU_WORKERS", raising=False)
+    monkeypatch.setattr(mm, "_pick_gpu_workers", lambda: 1)
+    monkeypatch.setattr(mm, "_free_vram_gb", lambda: free[0])
+    return mm._ResilientGpuPool()
+
+
+def test_the_default_pool_never_grows(monkeypatch):
     import threading
 
     import services.model_manager as mm
 
-    monkeypatch.delenv("OMNIVOICE_GPU_WORKERS", raising=False)
-    monkeypatch.setattr(mm, "_pick_gpu_workers", lambda: 1)       # built while a render held the card
-    pool = mm._ResilientGpuPool()
-    release, started = threading.Event(), []
-
-    def job():
-        started.append(1)
-        release.wait(5)
-
-    futures = [pool.submit(job) for _ in range(3)]
-    assert pool.stats()["workers"] == 1                           # no CUDA here: nothing to grow into
-
-    monkeypatch.setattr(mm, "_free_vram_gb", lambda: 12.0)        # the render ended
+    monkeypatch.delenv("OMNIVOICE_GPU_POOL_GROW", raising=False)
+    free = [40.0]
+    pool = _grow_pool(monkeypatch, mm, free)
+    release = threading.Event()
+    futures = [pool.submit(release.wait, 5) for _ in range(4)]
     pool._grow_checked = float("-inf")
-    futures.append(pool.submit(job))
-    assert pool.stats()["workers"] == 3                           # 1 + int(12 // 5)
+    futures.append(pool.submit(release.wait, 5))
+    assert pool.stats()["workers"] == 1
     release.set()
     [f.result(timeout=5) for f in futures]
+    pool.shutdown()
+
+
+def test_an_opted_in_pool_grows_to_two_when_there_is_room_and_a_reserve(monkeypatch):
+    import threading
+
+    import services.model_manager as mm
+
+    monkeypatch.setenv("OMNIVOICE_GPU_POOL_GROW", "1")
+    free = [8.0]                                          # a render holds the card
+    pool = _grow_pool(monkeypatch, mm, free)
+    release = threading.Event()
+    futures = [pool.submit(release.wait, 5) for _ in range(3)]
+    assert pool.stats()["workers"] == 1
+    free[0] = 30.0                                        # the render ended
+    pool._grow_checked = float("-inf")
+    futures.append(pool.submit(release.wait, 5))
+    assert pool.stats()["workers"] == 2                   # capped at 2, not 1 + 30 // 5
+    release.set()
+    [f.result(timeout=5) for f in futures]
+    pool.shutdown()
+
+
+def test_a_grown_pool_stops_growing_when_a_render_loads_and_shrinks_when_idle(monkeypatch):
+    import threading
+    import time
+
+    import services.model_manager as mm
+
+    monkeypatch.setenv("OMNIVOICE_GPU_POOL_GROW", "1")
+    free = [30.0]
+    pool = _grow_pool(monkeypatch, mm, free)
+    release = threading.Event()
+    futures = [pool.submit(release.wait, 5) for _ in range(3)]
+    assert pool.stats()["workers"] == 2
+    free[0] = 4.0                                         # a render is loading: under the reserve
+    pool._grow_checked = float("-inf")
+    futures.append(pool.submit(release.wait, 5))
+    assert pool.stats()["workers"] == 1                   # back to base: no new worker takes memory
+    free[0] = 30.0
+    pool._grow_checked = float("-inf")
+    pool.submit(lambda: None)                              # regrown
+    release.set()
+    [f.result(timeout=5) for f in futures]
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and pool._pool is not None:
+        time.sleep(0.05)
+    assert pool._pool is None, "a drained grown pool is dropped; the next submit builds the base size"
+    assert pool.submit(lambda: 7).result(timeout=5) == 7
     pool.shutdown()
 
 
 def test_a_pinned_pool_never_grows(monkeypatch):
     import services.model_manager as mm
 
+    monkeypatch.setenv("OMNIVOICE_GPU_POOL_GROW", "1")
     monkeypatch.setenv("OMNIVOICE_GPU_WORKERS", "1")
     monkeypatch.setattr(mm, "_free_vram_gb", lambda: 30.0)
     pool = mm._ResilientGpuPool()
