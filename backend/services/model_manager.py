@@ -171,6 +171,51 @@ def _workers_for_free_vram(free_gb: float) -> int:
     return max(1, min(_GPU_WORKER_CAP, int(free_gb // _GPU_VRAM_PER_JOB_GB)))
 
 
+#: Growth is opt-in (``OMNIVOICE_GPU_POOL_GROW=1``): the default pool is the size it was built at,
+#: so member-visible timing does not change unless the owner asks. When on, a pool grows only to
+#: ``OMNIVOICE_GPU_GROW_MAX`` workers (default 2) and only while at least
+#: ``OMNIVOICE_GPU_GROW_RESERVE_GB`` (default 10) stays free after the new worker's budget, so a render
+#: that loads next to it still fits.
+_GROW_MAX_DEFAULT = 2
+_GROW_RESERVE_GB_DEFAULT = 10.0
+
+
+def _grown_workers(current: int, free_gb: float, *, cap: int = _GROW_MAX_DEFAULT,
+                   reserve_gb: float = _GROW_RESERVE_GB_DEFAULT) -> int:
+    """GPU worker count once ``free_gb`` of VRAM is free beside the ``current`` workers: one more
+    per per-job budget that fits *and leaves ``reserve_gb`` free*, up to ``cap`` (and the pool's own
+    cap); never fewer than ``current``. Pure."""
+    room = int(max(0.0, free_gb - reserve_gb) // _GPU_VRAM_PER_JOB_GB)
+    return max(current, min(cap, _GPU_WORKER_CAP, current + room))
+
+
+def _grow_enabled() -> bool:
+    return os.environ.get("OMNIVOICE_GPU_POOL_GROW", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+#: The least time between two looks at the card for a pool that may grow.
+_GROW_CHECK_SECONDS = 5.0
+
+
+def _free_vram_gb() -> "float | None":
+    """Free VRAM on the CUDA device in GB; ``None`` when there is no CUDA device or it cannot
+    be read (the pool then stays as it is)."""
+    try:
+        torch = _lazy_torch()
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            return torch.cuda.mem_get_info()[0] / (1024 ** 3)
+    except Exception:  # noqa: BLE001 - a failed probe never fails a job
+        pass
+    return None
+
+
 def _pick_gpu_workers() -> int:
     """Pick a sensible GPU worker count from the runtime environment.
 
@@ -260,6 +305,52 @@ class _ResilientGpuPool(Executor):
         self._queued = 0
         self._running = 0
         self._avg_job_s = 0.0  # EMA of completed job wall time
+        self._grow_checked = float("-inf")
+        self._base_workers = 0
+
+    def _maybe_grow(self, pool: "ThreadPoolExecutor") -> None:
+        """Opt-in (:func:`_grow_enabled`). Grow a pool that has work waiting while the card has room
+        and a reserve beside it; hand a grown pool back to its base size the moment the free VRAM falls
+        under the reserve (a render is loading): new work then waits for a worker instead of taking
+        memory the render needs. Never when ``OMNIVOICE_GPU_WORKERS`` pins the size; at most once per
+        :data:`_GROW_CHECK_SECONDS`; threads start lazily on the next submits."""
+        if os.environ.get("OMNIVOICE_GPU_WORKERS") or not _grow_enabled():
+            return
+        now = time.monotonic()
+        if now - self._grow_checked < _GROW_CHECK_SECONDS:
+            return
+        self._grow_checked = now
+        current = getattr(pool, "_max_workers", 1)
+        base = self._base_workers or current
+        self._base_workers = base
+        free_gb = _free_vram_gb()
+        if free_gb is None:
+            return
+        reserve = _env_float("OMNIVOICE_GPU_GROW_RESERVE_GB", _GROW_RESERVE_GB_DEFAULT)
+        if current > base and free_gb < reserve:
+            pool._max_workers = base          # a render needs the memory: stop adding workers
+            logger.info("GPU pool back to %d worker(s) — only %.1f GB free (reserve %.1f)",
+                        base, free_gb, reserve)
+            return
+        with self._stats_lock:
+            waiting = self._queued > 0
+        if not waiting or current >= _GPU_WORKER_CAP:
+            return
+        target = _grown_workers(current, free_gb,
+                                cap=int(_env_float("OMNIVOICE_GPU_GROW_MAX", _GROW_MAX_DEFAULT)),
+                                reserve_gb=reserve)
+        if target > current:
+            pool._max_workers = target
+            logger.info("GPU pool grown to %d worker(s) — %.1f GB free beside %d (reserve %.1f)",
+                        target, free_gb, current, reserve)
+
+    def _shrink_when_idle(self) -> None:
+        """A grown pool that has drained goes back to its base size: its idle threads are dropped
+        with it (``reset``) and the next submit builds a fresh one."""
+        pool = self._pool
+        if self._base_workers and pool is not None \
+                and getattr(pool, "_max_workers", 0) > self._base_workers:
+            self.reset()
 
     def _live_pool(self) -> ThreadPoolExecutor:
         pool = self._pool
@@ -272,7 +363,9 @@ class _ResilientGpuPool(Executor):
 
     def _submit_live(self, fn, /, *args, **kwargs):
         try:
-            return self._live_pool().submit(fn, *args, **kwargs)
+            pool = self._live_pool()
+            self._maybe_grow(pool)
+            return pool.submit(fn, *args, **kwargs)
         except RuntimeError as e:
             # "cannot schedule new futures after shutdown": the inner pool was
             # reset (or torn down) under us. Rebuild once and retry so a stale
@@ -315,6 +408,7 @@ class _ResilientGpuPool(Executor):
                     # the one place that sees the pool drain, whichever route
                     # dispatched the last job. Never raises.
                     _note_gpu_pool_idle()
+                    self._shrink_when_idle()
 
         with self._stats_lock:
             self._queued += 1
@@ -366,6 +460,7 @@ class _ResilientGpuPool(Executor):
         """
         with self._lock:
             pool, self._pool = self._pool, None
+            self._base_workers = 0
         if pool is not None:
             try:
                 pool.shutdown(wait=False)
