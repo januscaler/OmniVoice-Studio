@@ -41,3 +41,56 @@ def test_budget_is_conservative_enough_for_the_asr_coload():
     # TTS (~1.6 GB) means a concurrent clone job needs ~5 GB; a regression back
     # toward 2.5 GB would re-enable the 2-worker-on-8 GB crash.
     assert _GPU_VRAM_PER_JOB_GB >= 5.0
+
+
+# ── Growing a pool built while the card was busy ──────────────────────────
+
+
+def test_a_pool_grows_by_what_fits_beside_it_and_never_shrinks():
+    from services.model_manager import _grown_workers
+
+    assert _grown_workers(1, 4.0) == 1          # nothing more fits beside one worker
+    assert _grown_workers(1, 5.0) == 2
+    assert _grown_workers(1, 15.0) == _GPU_WORKER_CAP
+    assert _grown_workers(2, 11.0) == _GPU_WORKER_CAP
+    assert _grown_workers(_GPU_WORKER_CAP, 40.0) == _GPU_WORKER_CAP
+    assert _grown_workers(3, 0.0) == 3          # a busy card never takes workers away
+
+
+def test_a_pool_with_work_waiting_grows_when_the_card_frees_up(monkeypatch):
+    import threading
+
+    import services.model_manager as mm
+
+    monkeypatch.delenv("OMNIVOICE_GPU_WORKERS", raising=False)
+    monkeypatch.setattr(mm, "_pick_gpu_workers", lambda: 1)       # built while a render held the card
+    pool = mm._ResilientGpuPool()
+    release, started = threading.Event(), []
+
+    def job():
+        started.append(1)
+        release.wait(5)
+
+    futures = [pool.submit(job) for _ in range(3)]
+    assert pool.stats()["workers"] == 1                           # no CUDA here: nothing to grow into
+
+    monkeypatch.setattr(mm, "_free_vram_gb", lambda: 12.0)        # the render ended
+    pool._grow_checked = float("-inf")
+    futures.append(pool.submit(job))
+    assert pool.stats()["workers"] == 3                           # 1 + int(12 // 5)
+    release.set()
+    [f.result(timeout=5) for f in futures]
+    pool.shutdown()
+
+
+def test_a_pinned_pool_never_grows(monkeypatch):
+    import services.model_manager as mm
+
+    monkeypatch.setenv("OMNIVOICE_GPU_WORKERS", "1")
+    monkeypatch.setattr(mm, "_free_vram_gb", lambda: 30.0)
+    pool = mm._ResilientGpuPool()
+    pool._pool = mm.ThreadPoolExecutor(max_workers=1)
+    pool._queued = 2
+    pool._maybe_grow(pool._pool)
+    assert pool.stats()["workers"] == 1
+    pool.shutdown()
